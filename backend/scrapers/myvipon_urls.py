@@ -1,18 +1,18 @@
 # scrapers/myvipon_urls.py
 
-
 from __future__ import annotations
 import os
 from shutil import which
 import json, random, re, time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, SessionNotCreatedException
 
 from settings import settings
 
@@ -174,7 +174,7 @@ def blast_to_bottom_once(driver, max_burst_steps: int, min_delta: int, max_delta
         if steps >= max_burst_steps:
             break
 
-def wait_for_append_or_banner(driver, prev_count: int, timeout_ms: int) -> tuple[int, bool]:
+def wait_for_append_or_banner(driver, prev_count: int, timeout_ms: int) -> Tuple[int, bool]:
     end = time.time() + timeout_ms / 1000.0
     while time.time() < end:
         if is_end_banner_visible(driver):
@@ -223,6 +223,81 @@ def extract_product_urls(driver, base: str) -> List[str]:
         urls.add(canonical)
     return sorted(urls)
 
+# ---------------------- driver helpers (Docker-safe) ----------------------
+
+def _resolve_chrome_binary() -> str:
+    candidates = [
+        os.getenv("CHROME_BINARY"),
+        which("google-chrome"),
+        "/usr/bin/google-chrome",
+        which("chromium"),
+        "/usr/bin/chromium",
+        which("chromium-browser"),
+        "/usr/bin/chromium-browser",
+    ]
+    for p in candidates:
+        if p and os.path.exists(p) and os.access(p, os.X_OK):
+            return str(p)
+    raise RuntimeError("Chrome/Chromium not found. Set CHROME_BINARY env or install the browser in the image.")
+
+def _build_chrome_options(headed: bool, *, legacy_headless: bool = False) -> Options:
+    opts = Options()
+    if headed:
+        opts.add_argument("--window-size=1366,1000")
+    else:
+        # Try modern headless first; legacy headless can be used if Chrome crashes
+        opts.add_argument("--headless" if legacy_headless else "--headless=new")
+        opts.add_argument("--window-size=1366,1000")
+
+    # Stability for containers
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-setuid-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--force-device-scale-factor=1")
+    opts.add_argument("--disable-background-timer-throttling")
+    opts.add_argument("--disable-backgrounding-occluded-windows")
+    opts.add_argument("--disable-renderer-backgrounding")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--disable-features=CalculateNativeWinOcclusion,TranslateUI,BlinkGenPropertyTrees")
+    opts.add_argument("--remote-debugging-port=0")   # let Chrome pick a free port
+    opts.add_argument("--user-data-dir=/tmp/chrome-profile")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
+    return opts
+
+def _make_driver(headed: bool = False):
+    chrome_bin = _resolve_chrome_binary()
+
+    # First attempt: modern headless (or headed)
+    try:
+        opts = _build_chrome_options(headed=headed, legacy_headless=False)
+        driver = uc.Chrome(
+            options=opts,
+            headless=not headed,
+            browser_executable_path=chrome_bin,
+            use_subprocess=True,
+        )
+        driver.set_page_load_timeout(60)
+        return driver
+    except (SessionNotCreatedException, WebDriverException) as e:
+        # If Chrome can't be reached in headless=new, retry once with legacy headless
+        msg = (str(e) or "").lower()
+        should_retry_legacy = (not headed) and (
+            "session not created" in msg or "chrome not reachable" in msg or "cannot connect to chrome" in msg
+        )
+        if should_retry_legacy:
+            opts2 = _build_chrome_options(headed=False, legacy_headless=True)
+            driver = uc.Chrome(
+                options=opts2,
+                headless=True,
+                browser_executable_path=chrome_bin,
+                use_subprocess=True,
+            )
+            driver.set_page_load_timeout(60)
+            return driver
+        raise
+
 # ---------------------- per-category scraping ----------------------
 
 def scrape_category_bottom_blaster(driver, url: str,
@@ -230,7 +305,7 @@ def scrape_category_bottom_blaster(driver, url: str,
                                    min_delta: int, max_delta: int,
                                    burst_steps: int,
                                    micro_pause_min: float, micro_pause_max: float,
-                                   append_wait_min_ms: int, append_wait_max_ms: int) -> tuple[List[str], bool]:
+                                   append_wait_min_ms: int, append_wait_max_ms: int) -> Tuple[List[str], bool]:
     driver.get(url)
     _ensure_awake_and_viewport(driver)
     _install_scroll_helpers(driver)
@@ -295,7 +370,7 @@ def load_default_myvipon_categories() -> list[dict[str, str]]:
       2) scrapers/data/myvipon_categories.json
     Returns [{"name": "...", "url": "..."}].
     """
-    if settings.myvipon_categories_path:
+    if getattr(settings, "myvipon_categories_path", None):
         p = Path(settings.myvipon_categories_path)
     else:
         p = Path(__file__).parent / "data" / "myvipon_categories.json"
@@ -340,38 +415,7 @@ def collect_myvipon_urls(
     """
     cats = categories or load_default_myvipon_categories()
 
-    chrome_opts = Options()
-    if headed:
-        chrome_opts.add_argument("--window-size=1366,1000")
-    else:
-        chrome_opts.add_argument("--headless=new")
-        chrome_opts.add_argument("--window-size=1366,1000")
-
-    chrome_opts.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_opts.add_argument("--no-sandbox")
-    chrome_opts.add_argument("--disable-dev-shm-usage")
-    chrome_opts.add_argument("--disable-gpu")
-    chrome_opts.add_argument("--force-device-scale-factor=1")
-    chrome_opts.add_argument("--disable-background-timer-throttling")
-    chrome_opts.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_opts.add_argument("--disable-renderer-backgrounding")
-    chrome_opts.add_argument("--disable-features=CalculateNativeWinOcclusion")
-
-    chrome_bin = (
-        os.getenv("CHROME_BINARY")
-        or which("google-chrome")
-        or which("chromium")
-        or which("chromium-browser")
-        or "/usr/bin/google-chrome"  # adjust if your image uses Chromium
-    )
-    chrome_bin = str(chrome_bin)  # ensure it's a plain string
-
-    driver = uc.Chrome(
-        options=chrome_opts,
-        headless=not headed,                 # matches your --headless=new flag above
-        browser_executable_path=chrome_bin,  # <-- key change
-    )
-    driver.set_page_load_timeout(60)
+    driver = _make_driver(headed=headed)
     by_category: Dict[str, List[str]] = {}
     all_set: set[str] = set()
 
@@ -414,3 +458,23 @@ def collect_myvipon_urls(
             pass
 
     return {"by_category": by_category, "all_urls": sorted(all_set)}
+
+# ---------------------- CLI test ----------------------
+
+if __name__ == "__main__":
+    """
+    Minimal local test:
+      python -m scrapers.myvipon_urls
+    Reads categories JSON and prints a small summary.
+    """
+    try:
+        res = collect_myvipon_urls(headed=False, max_time=60, loops=120, stall_rounds=3)
+        print(json.dumps({
+            "category_count": len(res["by_category"]),
+            "total_urls": len(res["all_urls"]),
+            "sample": res["all_urls"][:10],
+        }, ensure_ascii=False, indent=2))
+    except Exception as e:
+        # Print a concise error to stdout so it's visible in Docker logs
+        print(f"[myvipon_urls] ERROR: {e.__class__.__name__}: {e}")
+        raise
