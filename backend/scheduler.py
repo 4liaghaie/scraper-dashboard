@@ -94,7 +94,7 @@ def build_scheduler() -> AsyncIOScheduler:
     # Run once daily at 03:00 (change hour/minute to your preferred wall time)
     sched.add_job(
         run_daily_pipeline,
-        CronTrigger(hour=22, minute=46),
+        CronTrigger(hour=22, minute=00),
         id="daily_full_fresh_plus_stores",
         replace_existing=True,
         coalesce=True,

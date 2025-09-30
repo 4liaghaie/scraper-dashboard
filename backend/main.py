@@ -19,24 +19,24 @@ from security import hash_password
 from settings import settings
 from db import SessionLocal
 import models
-from scheduler import build_scheduler  # <-- add this
+from scheduler import build_scheduler, run_daily_pipeline
 from fastapi import BackgroundTasks
 import asyncio
 
 app = FastAPI(title="Scraper API")
 scheduler = build_scheduler()
-origins = settings.cors_origins
-allow_credentials = True
-if origins == ["*"]:
-    allow_credentials = False
+resolved_origins = settings.cors_origins or ["http://localhost:3000"]
+allow_credentials = False if resolved_origins == ["*"] else True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins or ["http://localhost:3000", "http://89.116.157.224:3000"],
-    allow_credentials=True,   # ok even if you don’t use cookies; harmless
+    allow_origins=resolved_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],     # optional
+    # expose_headers=["X-Total-Count"]  # if you truly need expose, list explicit headers
 )
+
 @app.on_event("startup")
 def ensure_superuser():
     with SessionLocal() as db:
