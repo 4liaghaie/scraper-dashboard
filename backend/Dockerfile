@@ -15,6 +15,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdk-pixbuf-2.0-0 libgbm1 libxshmfence1 libu2f-udev libvulkan1 \
     fonts-liberation fonts-unifont fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
+ RUN apt-get update && apt-get install -y wget gnupg ca-certificates \
+    libnss3 libasound2 libxss1 libxtst6 libx11-6 libx11-xcb1 libxcb1 \
+    libxcomposite1 libxcursor1 libxdamage1 libxi6 libgbm1 libxrandr2 \
+    libdrm2 libxshmfence1 fonts-liberation xdg-utils \
+ && wget -qO- https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-linux.gpg \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
+    > /etc/apt/sources.list.d/google-chrome.list \
+ && apt-get update && apt-get install -y google-chrome-stable \
+ && rm -rf /var/lib/apt/lists/*
+ENV CHROME_BINARY=/usr/bin/google-chrome
+
 
 WORKDIR /app
 
