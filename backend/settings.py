@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, SecretStr, EmailStr
+from pydantic import Field, field_validator
 
 class Settings(BaseSettings):
     database_url: str = Field(..., validation_alias="DATABASE_URL")
@@ -15,15 +16,28 @@ class Settings(BaseSettings):
     superuser_password: SecretStr | None = Field(None, validation_alias="SUPERUSER_PASSWORD")
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
-    @property
-    def cors_origins_normalized(self) -> list[str]:
-        if self.cors_origins and isinstance(self.cors_origins, str):
-            # If someone sets a raw string by mistake, split it
-            return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
-        return self.cors_origins
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _normalize_cors(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            # If JSON array string
+            if s.startswith("["):
+                import json
+                try:
+                    arr = json.loads(s)
+                    return [x.strip() for x in arr if isinstance(x, str) and x.strip()]
+                except Exception:
+                    # fall through to CSV parsing
+                    pass
+            # CSV or single origin
+            if s == "" or s == "*":
+                return ["*"]
+            return [x.strip() for x in s.split(",") if x.strip()]
+        return []
 
-    # expose a single name used above
-    @property
-    def cors_origins(self) -> list[str]:
-        return self.cors_origins_normalized
 settings = Settings()
