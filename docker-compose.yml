@@ -18,12 +18,14 @@ services:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-app}
       # CORS: allow your web origin(s)
       CORS_ORIGINS: "http://89.116.157.224:3000,http://localhost:3000"
-
+      CHROME_BINARY: /usr/bin/chromium
       PYTHONPATH: /app
     depends_on:
       - db
+
     ports:
       - "8000:8000"
+    shm_size: "1gb" # 👈 add this
 
   web:
     build:
