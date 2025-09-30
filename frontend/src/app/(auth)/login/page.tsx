@@ -1,13 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, setAuthToken } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
+// Avoid prerendering this page (prevents CSR bailout error)
+export const dynamic = "force-dynamic";
+
 export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-dvh flex items-center justify-center p-6">
+          Loading…
+        </main>
+      }
+    >
+      <LoginInner />
+    </Suspense>
+  );
+}
+
+function LoginInner() {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState<string | null>(null);
