@@ -12,6 +12,7 @@ from routers.routers_admin_users import router as admin_users_router
 from routers.routers_profile import router as profile_router
 from routers.product_actions import router as product_actions_router
 from routers.metrics import router as metrics_router
+from fastapi.middleware.cors import CORSMiddleware
 
 from jobs.manager import JobManager
 from security import hash_password
@@ -24,7 +25,14 @@ import asyncio
 
 app = FastAPI(title="Scraper API")
 scheduler = build_scheduler()
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins or ["http://localhost:3000", "http://89.116.157.224:3000"],
+    allow_credentials=True,   # ok even if you don’t use cookies; harmless
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],     # optional
+)
 @app.on_event("startup")
 def ensure_superuser():
     with SessionLocal() as db:

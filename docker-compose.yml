@@ -17,7 +17,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-app}
       # CORS: allow your web origin(s)
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: "http://89.116.157.224:3000,http://localhost:3000"
+
       PYTHONPATH: /app
     depends_on:
       - db

@@ -3,7 +3,7 @@ from pydantic import Field, SecretStr, EmailStr
 
 class Settings(BaseSettings):
     database_url: str = Field(..., validation_alias="DATABASE_URL")
-
+    cors_origins: list[str] = Field(default_factory=list, alias="CORS_ORIGINS")
     # JWT
     jwt_secret: SecretStr = Field(..., validation_alias="JWT_SECRET")
     jwt_algorithm: str = Field("HS256", validation_alias="JWT_ALGORITHM")
@@ -15,5 +15,15 @@ class Settings(BaseSettings):
     superuser_password: SecretStr | None = Field(None, validation_alias="SUPERUSER_PASSWORD")
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
+    @property
+    def cors_origins_normalized(self) -> list[str]:
+        if self.cors_origins and isinstance(self.cors_origins, str):
+            # If someone sets a raw string by mistake, split it
+            return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return self.cors_origins
 
+    # expose a single name used above
+    @property
+    def cors_origins(self) -> list[str]:
+        return self.cors_origins_normalized
 settings = Settings()
