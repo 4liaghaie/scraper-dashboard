@@ -1,4 +1,7 @@
 # scrapers/myvipon_urls.py
+import os
+from shutil import which
+
 from __future__ import annotations
 
 import json, random, re, time
@@ -354,9 +357,21 @@ def collect_myvipon_urls(
     chrome_opts.add_argument("--disable-renderer-backgrounding")
     chrome_opts.add_argument("--disable-features=CalculateNativeWinOcclusion")
 
-    driver = uc.Chrome(options=chrome_opts)
-    driver.set_page_load_timeout(60)
+    chrome_bin = (
+        os.getenv("CHROME_BINARY")
+        or which("google-chrome")
+        or which("chromium")
+        or which("chromium-browser")
+        or "/usr/bin/google-chrome"  # adjust if your image uses Chromium
+    )
+    chrome_bin = str(chrome_bin)  # ensure it's a plain string
 
+    driver = uc.Chrome(
+        options=chrome_opts,
+        headless=not headed,                 # matches your --headless=new flag above
+        browser_executable_path=chrome_bin,  # <-- key change
+    )
+    driver.set_page_load_timeout(60)
     by_category: Dict[str, List[str]] = {}
     all_set: set[str] = set()
 
