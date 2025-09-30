@@ -4,6 +4,7 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb && rm -rf /var/lib/apt/lists/*
 
 # System libs for Playwright HTTP client / Chromium runtime (safe even if you don't launch a browser)
 RUN apt-get update && apt-get install -y --no-install-recommends \

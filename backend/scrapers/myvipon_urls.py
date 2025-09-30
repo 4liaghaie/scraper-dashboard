@@ -1,11 +1,11 @@
 # scrapers/myvipon_urls.py
 
 from __future__ import annotations
-import os
+import os, os.path, atexit, subprocess, shlex
 from shutil import which
 import json, random, re, time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
@@ -120,7 +120,6 @@ def _spoof_visibility_and_focus(driver):
         pass
 
 def _ensure_awake_and_viewport(driver, width=1366, height=1000):
-    # Bring tab to front / keep lifecycle active
     try:
         driver.execute_cdp_cmd("Page.bringToFront", {})
     except Exception:
@@ -130,7 +129,6 @@ def _ensure_awake_and_viewport(driver, width=1366, height=1000):
     except Exception:
         pass
 
-    # Ensure sane viewport even if minimized/occluded
     try:
         vw, vh = driver.execute_script("return [window.innerWidth, window.innerHeight];")
     except Exception:
@@ -156,34 +154,6 @@ def _cdp_wheel(driver, delta_y=800):
         driver.execute_cdp_cmd("Input.dispatchMouseWheelEvent", {"x": x,"y": y,"deltaX": 0,"deltaY": int(delta_y),"pointerType": "mouse"})
     except Exception:
         pass
-
-# ---------------------- scrolling logic ----------------------
-
-def blast_to_bottom_once(driver, max_burst_steps: int, min_delta: int, max_delta: int,
-                         micro_pause_min: float, micro_pause_max: float):
-    steps = 0
-    while True:
-        gap = bottom_gap(driver)
-        if gap <= 10:
-            break
-        delta = min(max_delta, max(min_delta, int(gap * random.uniform(0.4, 0.9))))
-        wheel_scroll_from_element(driver, None, delta)
-        _cdp_wheel(driver, delta)
-        time.sleep(random.uniform(micro_pause_min, micro_pause_max))
-        steps += 1
-        if steps >= max_burst_steps:
-            break
-
-def wait_for_append_or_banner(driver, prev_count: int, timeout_ms: int) -> Tuple[int, bool]:
-    end = time.time() + timeout_ms / 1000.0
-    while time.time() < end:
-        if is_end_banner_visible(driver):
-            return get_card_count(driver), True
-        cur = get_card_count(driver)
-        if cur > prev_count:
-            return cur, False
-        time.sleep(0.06 + random.random() * 0.06)
-    return get_card_count(driver), is_end_banner_visible(driver)
 
 # ---------------------- extraction & normalization ----------------------
 
@@ -223,7 +193,36 @@ def extract_product_urls(driver, base: str) -> List[str]:
         urls.add(canonical)
     return sorted(urls)
 
-# ---------------------- driver helpers (Docker-safe) ----------------------
+# ---------------------- driver helpers (Docker + headed safe) ----------------------
+
+_XVFB_PROC: Optional[subprocess.Popen] = None
+
+def _maybe_start_xvfb(headed: bool, width: int = 1366, height: int = 1000) -> None:
+    """
+    If we need headed Chrome but there's no DISPLAY (typical in Docker),
+    start an Xvfb server and point DISPLAY to it.
+    """
+    global _XVFB_PROC
+    if not headed:
+        return
+    if os.getenv("DISPLAY"):
+        return  # real display provided by host/container
+    # Launch Xvfb :99
+    cmd = f"Xvfb :99 -screen 0 {width}x{height}x24 -nolisten tcp"
+    _XVFB_PROC = subprocess.Popen(shlex.split(cmd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.environ["DISPLAY"] = ":99"
+    # Prevent noisy dbus errors
+    os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", "/dev/null")
+    # Give Xvfb a moment to come up
+    time.sleep(0.4)
+
+    def _cleanup():
+        try:
+            if _XVFB_PROC and _XVFB_PROC.poll() is None:
+                _XVFB_PROC.terminate()
+        except Exception:
+            pass
+    atexit.register(_cleanup)
 
 def _resolve_chrome_binary() -> str:
     candidates = [
@@ -240,16 +239,17 @@ def _resolve_chrome_binary() -> str:
             return str(p)
     raise RuntimeError("Chrome/Chromium not found. Set CHROME_BINARY env or install the browser in the image.")
 
-def _build_chrome_options(headed: bool, *, legacy_headless: bool = False) -> Options:
+def _build_chrome_options(headed: bool) -> Options:
     opts = Options()
     if headed:
         opts.add_argument("--window-size=1366,1000")
+        # IMPORTANT: no --headless flags when headed
     else:
-        # Try modern headless first; legacy headless can be used if Chrome crashes
-        opts.add_argument("--headless" if legacy_headless else "--headless=new")
+        # You can still call this module in headless mode when desired
+        opts.add_argument("--headless=new")
         opts.add_argument("--window-size=1366,1000")
 
-    # Stability for containers
+    # Stability flags for containers/Xvfb
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-setuid-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -260,18 +260,22 @@ def _build_chrome_options(headed: bool, *, legacy_headless: bool = False) -> Opt
     opts.add_argument("--disable-renderer-backgrounding")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-features=CalculateNativeWinOcclusion,TranslateUI,BlinkGenPropertyTrees")
-    opts.add_argument("--remote-debugging-port=0")   # let Chrome pick a free port
+    # Let Chrome choose an open devtools port
+    opts.add_argument("--remote-debugging-port=0")
+    # Writable profile dir in container
     opts.add_argument("--user-data-dir=/tmp/chrome-profile")
     opts.add_argument("--no-first-run")
     opts.add_argument("--no-default-browser-check")
     return opts
 
 def _make_driver(headed: bool = False):
-    chrome_bin = _resolve_chrome_binary()
+    # If headed in Docker, ensure a display exists (start Xvfb if needed)
+    _maybe_start_xvfb(headed=headed, width=1366, height=1000)
 
-    # First attempt: modern headless (or headed)
+    chrome_bin = _resolve_chrome_binary()
+    opts = _build_chrome_options(headed=headed)
+
     try:
-        opts = _build_chrome_options(headed=headed, legacy_headless=False)
         driver = uc.Chrome(
             options=opts,
             headless=not headed,
@@ -281,22 +285,53 @@ def _make_driver(headed: bool = False):
         driver.set_page_load_timeout(60)
         return driver
     except (SessionNotCreatedException, WebDriverException) as e:
-        # If Chrome can't be reached in headless=new, retry once with legacy headless
-        msg = (str(e) or "").lower()
-        should_retry_legacy = (not headed) and (
-            "session not created" in msg or "chrome not reachable" in msg or "cannot connect to chrome" in msg
-        )
-        if should_retry_legacy:
-            opts2 = _build_chrome_options(headed=False, legacy_headless=True)
-            driver = uc.Chrome(
-                options=opts2,
-                headless=True,
-                browser_executable_path=chrome_bin,
-                use_subprocess=True,
-            )
-            driver.set_page_load_timeout(60)
-            return driver
+        # If modern headless crashes (when not headed), retry legacy headless once
+        if not headed:
+            try:
+                opts2 = _build_chrome_options(headed=False)
+                # swap headless mode to legacy
+                args = [a for a in opts2.arguments if not a.startswith("--headless")]
+                opts2.arguments = args + ["--headless"]
+                driver = uc.Chrome(
+                    options=opts2,
+                    headless=True,
+                    browser_executable_path=chrome_bin,
+                    use_subprocess=True,
+                )
+                driver.set_page_load_timeout(60)
+                return driver
+            except Exception:
+                pass
+        # Headed failures here usually mean Xvfb is missing or Chrome libs are missing
         raise
+
+# ---------------------- scrolling logic ----------------------
+
+def blast_to_bottom_once(driver, max_burst_steps: int, min_delta: int, max_delta: int,
+                         micro_pause_min: float, micro_pause_max: float):
+    steps = 0
+    while True:
+        gap = bottom_gap(driver)
+        if gap <= 10:
+            break
+        delta = min(max_delta, max(min_delta, int(gap * random.uniform(0.4, 0.9))))
+        wheel_scroll_from_element(driver, None, delta)
+        _cdp_wheel(driver, delta)
+        time.sleep(random.uniform(micro_pause_min, micro_pause_max))
+        steps += 1
+        if steps >= max_burst_steps:
+            break
+
+def wait_for_append_or_banner(driver, prev_count: int, timeout_ms: int) -> Tuple[int, bool]:
+    end = time.time() + timeout_ms / 1000.0
+    while time.time() < end:
+        if is_end_banner_visible(driver):
+            return get_card_count(driver), True
+        cur = get_card_count(driver)
+        if cur > prev_count:
+            return cur, False
+        time.sleep(0.06 + random.random() * 0.06)
+    return get_card_count(driver), is_end_banner_visible(driver)
 
 # ---------------------- per-category scraping ----------------------
 
@@ -462,19 +497,14 @@ def collect_myvipon_urls(
 # ---------------------- CLI test ----------------------
 
 if __name__ == "__main__":
-    """
-    Minimal local test:
-      python -m scrapers.myvipon_urls
-    Reads categories JSON and prints a small summary.
-    """
+    # Quick local/CI test
     try:
-        res = collect_myvipon_urls(headed=False, max_time=60, loops=120, stall_rounds=3)
+        res = collect_myvipon_urls(headed=True, max_time=30, loops=100, stall_rounds=2)
         print(json.dumps({
             "category_count": len(res["by_category"]),
             "total_urls": len(res["all_urls"]),
             "sample": res["all_urls"][:10],
         }, ensure_ascii=False, indent=2))
     except Exception as e:
-        # Print a concise error to stdout so it's visible in Docker logs
         print(f"[myvipon_urls] ERROR: {e.__class__.__name__}: {e}")
         raise
