@@ -1,0 +1,72 @@
+{
+  "categories": [
+    {
+      "name": "Home & Kitchen",
+      "url": "https://rebaid.com/?category=home-rebates"
+    },
+    {
+      "name": "Forniture",
+      "url": "https://rebaid.com/?category=discount-furniture-rebates"
+    },
+    {
+      "name": "Toys & Games",
+      "url": "https://rebaid.com/?category=discount-toys-cash-back"
+    },
+    {
+      "name": "Apparel",
+      "url": "https://rebaid.com/?category=shop-rebates-clothing"
+    },
+    {
+      "name": "Sports & Outdoors",
+      "url": "https://rebaid.com/?category=cash-back-sporting-goods"
+    },
+    {
+      "name": "Office Supplies",
+      "url": "https://rebaid.com/?category=cash-back-office-supplies"
+    },
+    {
+      "name": "Baby Care",
+      "url": "https://rebaid.com/?category=discount-baby-care"
+    },
+    {
+      "name": "Other",
+      "url": "https://rebaid.com/?category=shop-rebates-other"
+    },
+    {
+      "name": "Electronics",
+      "url": "https://rebaid.com/?category=shop-rebates-electronics"
+    },
+    {
+      "name": "Automatives",
+      "url": "https://rebaid.com/?category=automotive-zone-rebates"
+    },
+    {
+      "name": "Books",
+      "url": "https://rebaid.com/?category=shop-rebates-books"
+    },
+    {
+      "name": "Jewelry",
+      "url": "https://rebaid.com/?category=shop-rebates-jewelry"
+    },
+    {
+      "name": "Pet Care",
+      "url": "https://rebaid.com/?category=bl-pet-rebates"
+    },
+    {
+      "name": "Tools",
+      "url": "https://rebaid.com/?category=tool-rebates"
+    },
+    {
+      "name": "Supplements",
+      "url": "https://rebaid.com/?category=supplement-giveaway"
+    },
+    {
+      "name": "Adult Products",
+      "url": "https://rebaid.com/?category=discount-adult-products"
+    },
+    {
+      "name": "Health & Beauty",
+      "url": "https://rebaid.com/?category=health-and-beauty-deals"
+    }
+  ]
+}

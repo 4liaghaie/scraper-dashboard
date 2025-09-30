@@ -1,0 +1,96 @@
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.orig
+*.bak
+*.log
+.idea/
+.vscode/
+*.code-workspace
+
+# ---- Env files ----
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+
+# ---- Python (backend) ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+dist/
+build/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+ENV/
+
+# SQLite / misc local db files (if any)
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# ---- Node/Next.js (frontend) ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.next/
+.next/cache/
+out/
+build/
+dist/
+.turbo/
+.eslintcache
+.stylelintcache
+
+# ---- Playwright ----
+playwright-report/
+test-results/
+.playwright/
+# optional browser binaries cache (uncomment if you don't want to commit them)
+# / playwright/.cache/
+
+# ---- Images/Uploads (if you store locally; adjust if needed) ----
+uploads/
+public/uploads/
+
+# ---- Docker / Compose ----
+# (Note: for Docker build context rules use a separate .dockerignore)
+docker-data/
+*.pid
+
+# ---- Coverage / Reports ----
+coverage/
+lcov.info
+
+# ---- Misc ----
+*.tgz
+*.tar.gz
+*.zip
+
+# ---- Framework hosting (optional) ----
+.vercel/
