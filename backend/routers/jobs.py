@@ -762,6 +762,8 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
 
             rebaid_items = _tag_rebaid("codes") + _tag_rebaid("cashback") + _tag_rebaid("buyonrebaid")
             rebaid_items = _dedupe_items_by_url(rebaid_items, url_key="url")  # critical
+            rebaid_detail_targets = _dedupe_urls([x["url"] for x in rebaid_items])
+
             rebaid_urls = [x["url"] for x in rebaid_items]
             rebaid_existing = _existing_url_set(rebaid_urls)
             rebaid_new_items = [x for x in rebaid_items if x["url"] not in rebaid_existing]
@@ -773,6 +775,8 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
             rk_data = await asyncio.to_thread(collect_rebatekey_urls, headless=not rebatekey_headed)
             rk_rebate = _dedupe_urls(rk_data.get("rebate_urls", []) or [])
             rk_coupons = _dedupe_urls(rk_data.get("coupons_urls", []) or [])
+            rk_detail_targets = _dedupe_urls(rk_rebate + rk_coupons)
+
             rk_urls_all = rk_rebate + rk_coupons
             rk_existing = _existing_url_set(rk_urls_all)
             rk_rebate_new = [u for u in rk_rebate if u not in rk_existing]
@@ -796,6 +800,8 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
                     mv_items.append({"url": u, "price_value": None, "type": None, "category_name": cat_name})
             # dedupe across categories & scraper repeats
             mv_items = _dedupe_items_by_url(mv_items, url_key="url")
+            mv_detail_targets = _dedupe_urls([x["url"] for x in mv_items])
+
             mv_urls_all = [x["url"] for x in mv_items]
             mv_existing = _existing_url_set(mv_urls_all)
             mv_new_items = [x for x in mv_items if x["url"] not in mv_existing]
@@ -812,14 +818,19 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
             if detail_total:
                 await job_manager.mark_running(job_id, detail_total)
 
-            # ---------- 4) Rebaid details ----------
-            if new_rebaid_urls:
+
+            # ---------- 4) Rebaid details (visited) ----------
+            if rebaid_detail_targets:
                 await job_manager.tick(job_id, ok=True, note="collecting rebaid details...")
                 ok_items: list[dict] = []
                 BATCH = 20
-                for i in range(0, len(new_rebaid_urls), BATCH):
-                    chunk = new_rebaid_urls[i:i + BATCH]
-                    data_list = await asyncio.to_thread(scrape_rebaid_details, chunk, timeout_ms=rebaid_detail_timeout_ms)
+                for i in range(0, len(rebaid_detail_targets), BATCH):
+                    chunk = rebaid_detail_targets[i:i + BATCH]
+                    data_list = await asyncio.to_thread(
+                        scrape_rebaid_details,
+                        chunk,
+                        timeout_ms=rebaid_detail_timeout_ms
+                    )
                     for d in data_list:
                         ok_items.append({
                             "url": d.get("url"),
@@ -834,12 +845,12 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
                 if ok_items:
                     await _chunked_upsert_details(db2, "rebaid", ok_items)
 
-            # ---------- 5) RebateKey details ----------
-            if new_rk_urls:
+            # ---------- 5) RebateKey details (visited) ----------
+            if rk_detail_targets:
                 await job_manager.tick(job_id, ok=True, note="collecting rebatekey details...")
                 scraped = await asyncio.to_thread(
                     collect_rebatekey_details,
-                    new_rk_urls,
+                    rk_detail_targets,
                     concurrency=rebatekey_concurrency,
                     retries=rebatekey_retries,
                     timeout=rebatekey_timeout,
@@ -855,15 +866,15 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
                 } for s in scraped]
                 if items:
                     await _chunked_upsert_details(db2, "rebatekey", items)
-                await job_manager.tick(job_id, ok=True, plus=len(new_rk_urls), meta={"site": "rebatekey"})
+                await job_manager.tick(job_id, ok=True, plus=len(rk_detail_targets), meta={"site": "rebatekey"})
 
-            # ---------- 6) MyVipon details ----------
-            if new_mv_urls:
+            # ---------- 6) MyVipon details (visited) ----------
+            if mv_detail_targets:
                 await job_manager.tick(job_id, ok=True, note="collecting myvipon details...")
                 ok_items: list[dict] = []
                 BATCH = 24
-                for i in range(0, len(new_mv_urls), BATCH):
-                    chunk = new_mv_urls[i:i + BATCH]
+                for i in range(0, len(mv_detail_targets), BATCH):
+                    chunk = mv_detail_targets[i:i + BATCH]
                     res = await asyncio.to_thread(
                         scrape_myvipon_details,
                         chunk,
