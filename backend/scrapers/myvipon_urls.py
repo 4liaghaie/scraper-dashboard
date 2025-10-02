@@ -6,6 +6,7 @@ from shutil import which
 import json, random, re, time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+import subprocess
 
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
@@ -267,6 +268,28 @@ def _build_chrome_options(headed: bool) -> Options:
     opts.add_argument("--no-first-run")
     opts.add_argument("--no-default-browser-check")
     return opts
+def _detect_chrome_major(chrome_bin: str) -> int | None:
+    try:
+        out = subprocess.check_output([chrome_bin, "--version"], text=True).strip()
+        # e.g. "Google Chrome 140.0.7339.207"
+        m = re.search(r"\b(\d+)\.", out)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+def _ensure_matching_chromedriver(major: int | None) -> str | None:
+    """
+    Ask undetected-chromedriver to install a driver matching the given major.
+    Returns driver executable path (or None if failed, UC will try its default).
+    """
+    if not major:
+        return None
+    try:
+        # uc.install downloads a chromedriver for the requested major version
+        return uc.install(version_main=major)
+    except Exception:
+        return None
+
 
 def _make_driver(headed: bool = False):
     # If headed in Docker, ensure a display exists (start Xvfb if needed)
@@ -274,12 +297,15 @@ def _make_driver(headed: bool = False):
 
     chrome_bin = _resolve_chrome_binary()
     opts = _build_chrome_options(headed=headed)
+    chrome_major = _detect_chrome_major(chrome_bin)
+    driver_path = _ensure_matching_chromedriver(chrome_major)
 
     try:
         driver = uc.Chrome(
             options=opts,
             headless=not headed,
             browser_executable_path=chrome_bin,
+            driver_executable_path=driver_path,  # <-- ensures driver matches Chrome 140
             use_subprocess=True,
         )
         driver.set_page_load_timeout(60)
