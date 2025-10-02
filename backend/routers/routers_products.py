@@ -1,8 +1,8 @@
 from typing import Optional
+from datetime import datetime, time  # ← add
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, and_, asc, desc
-from sqlalchemy.orm import joinedload
 from db import get_session
 import models
 from schemas import ProductOut, ProductPage
@@ -18,6 +18,21 @@ SORT_MAP = {
     "price": models.Product.price,
 }
 
+def _parse_date_bound(s: Optional[str], *, end: bool = False) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        if len(s) == 10:  # "YYYY-MM-DD"
+            d = datetime.strptime(s, "%Y-%m-%d").date()
+            return datetime.combine(d, time.max if end else time.min)
+        return datetime.fromisoformat(s)  # ISO-8601
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date format. Use YYYY-MM-DD or ISO-8601."
+        )
+
+
 @router.get("", response_model=ProductPage, dependencies=[Depends(get_current_user)])
 def list_products(
     page: int = Query(1, ge=1),
@@ -26,16 +41,16 @@ def list_products(
     q: Optional[str] = Query(None, description="Search in title / product_url / store name"),
     sort: str = Query("-created_at", description="Field to sort by, prefix with '-' for desc"),
     store: Literal["any", "present", "missing"] = Query("any", description="filter by amazon store presence"),
+    # NEW:
+    last_seen_from: Optional[str] = Query(None, description="YYYY-MM-DD or ISO-8601"),
+    last_seen_to: Optional[str] = Query(None, description="YYYY-MM-DD or ISO-8601"),
     db: Session = Depends(get_session),
 ):
-    # base query with site eager-loaded to avoid N+1
     query = db.query(models.Product).options(joinedload(models.Product.site))
 
-    # filter by site name if provided
     if site:
         query = query.join(models.Site).filter(models.Site.name == site)
 
-    # simple search
     if q:
         like = f"%{q}%"
         query = query.filter(
@@ -47,7 +62,6 @@ def list_products(
             )
         )
 
-    # store presence filter
     if store == "present":
         query = query.filter(
             and_(
@@ -67,16 +81,23 @@ def list_products(
             )
         )
 
-    # total before pagination
+    # NEW: last_seen_at filtering
+    start_dt = _parse_date_bound(last_seen_from, end=False)
+    end_dt = _parse_date_bound(last_seen_to, end=True)
+    if start_dt and end_dt and start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="last_seen_from must be <= last_seen_to")
+    if start_dt:
+        query = query.filter(models.Product.last_seen_at >= start_dt)
+    if end_dt:
+        query = query.filter(models.Product.last_seen_at <= end_dt)
+
     total = query.count()
 
-    # sorting
     direction = desc if sort.startswith("-") else asc
     key = sort.lstrip("+-")
     col = SORT_MAP.get(key, models.Product.created_at)
     query = query.order_by(direction(col))
 
-    # pagination
     items = query.offset((page - 1) * page_size).limit(page_size).all()
 
     return {

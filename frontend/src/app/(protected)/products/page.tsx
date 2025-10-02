@@ -49,12 +49,18 @@ export default function ProductsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [site, setSite] = useState<string>("");
+
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("-created_at");
 
   // NEW: store presence filter
   const [store, setStore] = useState<"any" | "present" | "missing">("any");
+
+  // NEW: export filters
+  const [lastSeenFrom, setLastSeenFrom] = useState<string>(""); // YYYY-MM-DD
+  const [lastSeenTo, setLastSeenTo] = useState<string>(""); // YYYY-MM-DD
+  const [idsCsv, setIdsCsv] = useState<string>(""); // "1,2,3"
 
   // details modal state
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -63,7 +69,7 @@ export default function ProductsPage() {
   // When filters change, reset to first page
   useEffect(() => {
     setPage(1);
-  }, [site, q, sort, pageSize, store]);
+  }, [site, q, sort, pageSize, store, lastSeenFrom, lastSeenTo]);
 
   const params = useMemo(() => {
     const p: Record<string, string | number> = {
@@ -73,9 +79,11 @@ export default function ProductsPage() {
     };
     if (site) p.site = site;
     if (q) p.q = q;
-    if (store !== "any") p.store = store; // pass only when filtering
+    if (store !== "any") p.store = store;
+    if (lastSeenFrom) p.last_seen_from = lastSeenFrom; // ← added
+    if (lastSeenTo) p.last_seen_to = lastSeenTo; // ← added
     return p;
-  }, [page, pageSize, site, q, sort, store]);
+  }, [page, pageSize, site, q, sort, store, lastSeenFrom, lastSeenTo]); // ← added
 
   const { data, isLoading, isError, refetch, isFetching } =
     useQuery<ProductPage>({
@@ -104,6 +112,31 @@ export default function ProductsPage() {
     setDetailsOpen(true);
   };
 
+  // === NEW: Export handler ===
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? ""; // e.g. "http://localhost:8000"
+  const handleExportCsv = () => {
+    const qs = new URLSearchParams();
+    if (site) qs.set("site", site);
+    if (lastSeenFrom) qs.set("last_seen_from", lastSeenFrom);
+    if (lastSeenTo) qs.set("last_seen_to", lastSeenTo);
+
+    const trimmed = idsCsv.trim();
+    // Single numeric id -> hit /exports/products/{id}.csv for nicer filename
+    if (trimmed && /^\d+$/.test(trimmed)) {
+      const url = `${apiBase}/exports/products/${trimmed}.csv`;
+      window.open(url, "_blank");
+      return;
+    }
+    // Multiple ids -> /exports/products.csv?ids=...
+    if (trimmed) {
+      qs.set("ids", trimmed);
+    }
+
+    const query = qs.toString();
+    const url = `${apiBase}/exports/products.csv` + (query ? `?${query}` : "");
+    window.open(url, "_blank");
+  };
+
   return (
     <main className="p-6">
       <Card className="max-w-[1600px] mx-auto">
@@ -124,8 +157,6 @@ export default function ProductsPage() {
                 <option value="rebatekey">rebatekey</option>
               </select>
             </div>
-
-
 
             <div className="md:col-span-4">
               <label className="block text-sm mb-1">Search</label>
@@ -157,7 +188,31 @@ export default function ProductsPage() {
               </select>
             </div>
 
-            <div className="md:col-span-12 flex items-end justify-end">
+            {/* === NEW: Export controls === */}
+            <div className="md:col-span-2">
+              <label className="block text-sm mb-1">Last seen (from)</label>
+              <Input
+                type="date"
+                value={lastSeenFrom}
+                onChange={(e) => setLastSeenFrom(e.target.value)}
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm mb-1">Last seen (to)</label>
+              <Input
+                type="date"
+                value={lastSeenTo}
+                onChange={(e) => setLastSeenTo(e.target.value)}
+              />
+            </div>
+            <div className="md:col-span-12 flex items-end justify-end gap-2">
+              <Button
+                variant="secondary"
+                onClick={handleExportCsv}
+                title="Download CSV (filters above applied)"
+              >
+                Export CSV
+              </Button>
               <Button
                 variant="outline"
                 onClick={() => refetch()}
@@ -166,6 +221,7 @@ export default function ProductsPage() {
                 {isFetching ? "Refreshing…" : "Refresh"}
               </Button>
             </div>
+            {/* === END: Export controls === */}
           </div>
         </CardHeader>
 

@@ -12,6 +12,8 @@ from routers.routers_admin_users import router as admin_users_router
 from routers.routers_profile import router as profile_router
 from routers.product_actions import router as product_actions_router
 from routers.metrics import router as metrics_router
+from routers import exports
+
 from fastapi.middleware.cors import CORSMiddleware
 
 from jobs.manager import JobManager
@@ -80,7 +82,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(profile_router)
-
+app.include_router(exports.router)
 app.include_router(sites_router)
 app.include_router(scrape_router)
 app.include_router(products_router)
