@@ -230,8 +230,8 @@ async def _run_job(job_id: str, run_coro: Callable[[str], Any]):
 
 # ---------- job preparations (one per kind) ----------
 async def _prep_rebaid_details(p: Dict[str, Any], db: Session):
-    missing_only: bool = bool(p.get("missing_only", True))
-    limit: int = int(p.get("limit", 300))
+    missing_only: bool = bool(p.get("missing_only", False))
+    limit: int = int(p.get("limit", 1000))
     timeout_ms: int = int(p.get("timeout_ms", 12000))
 
     # Use request-scoped db *only* to discover targets
@@ -287,7 +287,7 @@ async def _prep_myvipon_details(p: Dict[str, Any], db: Session):
       - backoff      (float,default 1.0)
       - referer      (str,  default VIPON_REFERER)
     """
-    only_missing: bool = bool(p.get("only_missing", True))
+    only_missing: bool = bool(p.get("only_missing", False))
     limit: int = int(p.get("limit", 200))
     workers: int = int(p.get("workers", 6))
     timeout: int = int(p.get("timeout", 30))
@@ -352,7 +352,7 @@ async def _prep_myvipon_details(p: Dict[str, Any], db: Session):
     return total, run
 
 async def _prep_rebatekey_details(p: Dict[str, Any], db: Session):
-    missing_only: bool = bool(p.get("missing_only", True))
+    missing_only: bool = bool(p.get("missing_only", False))
     limit: int = int(p.get("limit", 300))
     concurrency: int = int(p.get("concurrency", 12))
     retries: int = int(p.get("retries", 2))
