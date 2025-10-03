@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,7 +16,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ExternalLink, Info } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Sheet,
+  SheetTrigger,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+  SheetFooter,
+  SheetClose,
+} from "@/components/ui/sheet";
+import { ExternalLink, Info, Loader2 } from "lucide-react";
 import ProductDetailsDialog, {
   Product,
 } from "@/components/product-details-dialog";
@@ -28,6 +40,13 @@ type ProductPage = {
   has_next: boolean;
   has_prev: boolean;
 };
+
+const SITES = [
+  { label: "All", value: "all" },
+  { label: "myvipon", value: "myvipon" },
+  { label: "rebaid", value: "rebaid" },
+  { label: "rebatekey", value: "rebatekey" },
+];
 
 const fmtDate = (iso?: string) =>
   iso
@@ -46,27 +65,46 @@ const fmtPrice = (v: Product["price"]) => {
 };
 
 export default function ProductsPage() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const search = useSearchParams();
+
+  const initialSite = search.get("site") ?? "";
+  const [site, setSite] = useState<string>(initialSite);
+  const [siteTab, setSiteTab] = useState<string>(initialSite || "all");
+
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [site, setSite] = useState<string>("");
 
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("-created_at");
 
-  // NEW: store presence filter
   const [store, setStore] = useState<"any" | "present" | "missing">("any");
 
-  // NEW: export filters
-  const [lastSeenFrom, setLastSeenFrom] = useState<string>(""); // YYYY-MM-DD
-  const [lastSeenTo, setLastSeenTo] = useState<string>(""); // YYYY-MM-DD
-  const [idsCsv, setIdsCsv] = useState<string>(""); // "1,2,3"
+  // Filters
+  const [lastSeenFrom, setLastSeenFrom] = useState<string>("");
+  const [lastSeenTo, setLastSeenTo] = useState<string>("");
 
-  // details modal state
+  // Export drawer state & form
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportingSheet, setExportingSheet] = useState(false);
+  const [sheetId, setSheetId] = useState("");
+  const [worksheet, setWorksheet] = useState("Products Export");
+  const [sheetMode, setSheetMode] = useState<"replace" | "append">("replace");
+
+  // details modal
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selected, setSelected] = useState<Product | null>(null);
 
-  // When filters change, reset to first page
+  // sync site from URL on client nav
+  useEffect(() => {
+    const s = search.get("site") ?? "";
+    setSite(s);
+    setSiteTab(s || "all");
+  }, [search]);
+
+  // reset page when filters change
   useEffect(() => {
     setPage(1);
   }, [site, q, sort, pageSize, store, lastSeenFrom, lastSeenTo]);
@@ -80,10 +118,10 @@ export default function ProductsPage() {
     if (site) p.site = site;
     if (q) p.q = q;
     if (store !== "any") p.store = store;
-    if (lastSeenFrom) p.last_seen_from = lastSeenFrom; // ← added
-    if (lastSeenTo) p.last_seen_to = lastSeenTo; // ← added
+    if (lastSeenFrom) p.last_seen_from = lastSeenFrom;
+    if (lastSeenTo) p.last_seen_to = lastSeenTo;
     return p;
-  }, [page, pageSize, site, q, sort, store, lastSeenFrom, lastSeenTo]); // ← added
+  }, [page, pageSize, site, q, sort, store, lastSeenFrom, lastSeenTo]);
 
   const { data, isLoading, isError, refetch, isFetching } =
     useQuery<ProductPage>({
@@ -112,53 +150,231 @@ export default function ProductsPage() {
     setDetailsOpen(true);
   };
 
-  // === NEW: Export handler ===
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? ""; // e.g. "http://localhost:8000"
+  // Tabs change → set site and update URL (?site=)
+  const onTabChange = (val: string) => {
+    setSiteTab(val);
+    const newSite = val === "all" ? "" : val;
+    setSite(newSite);
+
+    const qs = new URLSearchParams(search.toString());
+    if (newSite) qs.set("site", newSite);
+    else qs.delete("site");
+    router.replace(`${pathname}${qs.toString() ? `?${qs.toString()}` : ""}`, {
+      scroll: false,
+    });
+  };
+
+  // CSV export
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "";
   const handleExportCsv = () => {
     const qs = new URLSearchParams();
     if (site) qs.set("site", site);
     if (lastSeenFrom) qs.set("last_seen_from", lastSeenFrom);
     if (lastSeenTo) qs.set("last_seen_to", lastSeenTo);
+    const query = qs.toString();
+    const url = `${apiBase}/exports/products.csv${query ? `?${query}` : ""}`;
+    window.open(url, "_blank");
+  };
 
-    const trimmed = idsCsv.trim();
-    // Single numeric id -> hit /exports/products/{id}.csv for nicer filename
-    if (trimmed && /^\d+$/.test(trimmed)) {
-      const url = `${apiBase}/exports/products/${trimmed}.csv`;
-      window.open(url, "_blank");
+  // Google Sheets export
+  const handleExportSheet = async () => {
+    if (exportingSheet) return;
+    if (!sheetId.trim()) {
+      alert("Enter Spreadsheet ID");
       return;
     }
-    // Multiple ids -> /exports/products.csv?ids=...
-    if (trimmed) {
-      qs.set("ids", trimmed);
-    }
+    const qs = new URLSearchParams();
+    if (site) qs.set("site", site);
+    if (lastSeenFrom) qs.set("last_seen_from", lastSeenFrom);
+    if (lastSeenTo) qs.set("last_seen_to", lastSeenTo);
 
-    const query = qs.toString();
-    const url = `${apiBase}/exports/products.csv` + (query ? `?${query}` : "");
-    window.open(url, "_blank");
+    try {
+      setExportingSheet(true);
+      await api.post(`/exports/products.google-sheet?${qs.toString()}`, {
+        spreadsheet_id: sheetId.trim(),
+        worksheet: worksheet.trim() || undefined,
+        mode: sheetMode,
+        start_cell: "A1",
+      });
+      alert("Exported to Google Sheet ✅");
+    } catch (err: any) {
+      const msg =
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Export failed. Check permissions and Spreadsheet ID.";
+      alert(`Export failed: ${msg}`);
+    } finally {
+      setExportingSheet(false);
+    }
   };
 
   return (
     <main className="p-6">
       <Card className="max-w-[1600px] mx-auto">
         <CardHeader className="space-y-4">
-          <CardTitle className="text-xl">Products</CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-xl">Products</CardTitle>
 
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            <div className="md:col-span-3">
-              <label className="block text-sm mb-1">Site</label>
-              <select
-                value={site}
-                onChange={(e) => setSite(e.target.value)}
-                className="w-full border rounded-md px-3 py-2 bg-background"
+            {/* Export + Refresh */}
+            <div className="flex items-center gap-2">
+              <Sheet open={exportOpen} onOpenChange={setExportOpen}>
+                <SheetTrigger asChild>
+                  <Button variant="secondary">Export…</Button>
+                </SheetTrigger>
+                <SheetContent
+                  side="right"
+                  className="
+    w-[100vw] max-w-[100vw] sm:w-[640px]
+    h-[100dvh] sm:h-auto
+    overflow-y-auto
+    p-4 sm:p-6
+  "
+                >
+                  <SheetHeader>
+                    <SheetTitle>Export products</SheetTitle>
+                    <SheetDescription>
+                      Exports respect your current filters (site tab, last seen
+                      range, search).
+                    </SheetDescription>
+                  </SheetHeader>
+
+                  <div className="mt-6 space-y-8">
+                    {/* CSV */}
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-medium">CSV</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Download a CSV file with the current filters.
+                      </p>
+                      <div>
+                        <Button
+                          onClick={handleExportCsv}
+                          className="w-full"
+                          variant="secondary"
+                        >
+                          Download CSV
+                        </Button>
+                      </div>
+                    </section>
+
+                    {/* Google Sheets */}
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-medium">Google Sheets</h3>
+                      <div className="grid grid-cols-1 gap-3">
+                        <div>
+                          <label className="block text-xs mb-1">
+                            Spreadsheet ID
+                          </label>
+                          <Input
+                            placeholder="1_OpkZ4F5ybI9dKWL5ZwngFhNV7iUodLw8W1HMaElir8"
+                            value={sheetId}
+                            onChange={(e) => setSheetId(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs mb-1">
+                            Worksheet title
+                          </label>
+                          <Input
+                            placeholder="Products Export"
+                            value={worksheet}
+                            onChange={(e) => setWorksheet(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs mb-1">Mode</label>
+                          <select
+                            value={sheetMode}
+                            onChange={(e) =>
+                              setSheetMode(
+                                e.target.value as "replace" | "append"
+                              )
+                            }
+                            className="w-full border rounded-md px-3 py-2 bg-background"
+                          >
+                            <option value="replace">replace</option>
+                            <option value="append">append</option>
+                          </select>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Button
+                            onClick={handleExportSheet}
+                            disabled={exportingSheet}
+                            className="w-full sm:w-auto"
+                          >
+                            {exportingSheet ? (
+                              <>
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                Exporting…
+                              </>
+                            ) : (
+                              "Export to Google Sheet"
+                            )}
+                          </Button>
+                          <SheetClose asChild>
+                            <Button
+                              variant="outline"
+                              className="w-full sm:w-auto"
+                            >
+                              Close
+                            </Button>
+                          </SheetClose>
+                        </div>
+
+                        <p className="text-xs text-muted-foreground">
+                          Make sure the spreadsheet is shared with your service
+                          account (Editor).
+                        </p>
+                      </div>
+                    </section>
+
+                    {/* Current filters summary */}
+                    <section className="text-xs text-muted-foreground">
+                      <div>
+                        <span className="font-medium">Using:</span>{" "}
+                        {site ? `site=${site}` : "All sites"}
+                        {lastSeenFrom || lastSeenTo
+                          ? ` • last_seen=${lastSeenFrom || "…"} → ${
+                              lastSeenTo || "…"
+                            }`
+                          : ""}
+                        {q ? ` • search="${q}"` : ""}
+                      </div>
+                    </section>
+                  </div>
+
+                  {/* Optional pinned footer area (keeps actions visible on small screens) */}
+                  <SheetFooter className="sticky bottom-0 bg-background pt-4 mt-6">
+                    {/* You can add extra actions here if needed */}
+                  </SheetFooter>
+                </SheetContent>
+              </Sheet>
+
+              <Button
+                variant="outline"
+                onClick={() => refetch()}
+                disabled={isFetching}
               >
-                <option value="">All</option>
-                <option value="myvipon">myvipon</option>
-                <option value="rebaid">rebaid</option>
-                <option value="rebatekey">rebatekey</option>
-              </select>
+                {isFetching ? "Refreshing…" : "Refresh"}
+              </Button>
             </div>
+          </div>
 
-            <div className="md:col-span-4">
+          {/* Site Tabs */}
+          <Tabs value={siteTab} onValueChange={onTabChange} className="w-full">
+            <TabsList className="grid grid-cols-4 w-full md:w-auto">
+              {SITES.map((s) => (
+                <TabsTrigger key={s.value} value={s.value}>
+                  {s.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+
+          {/* Filters row (no export controls here anymore) */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 mt-2">
+            {/* Search */}
+            <div className="md:col-span-5">
               <label className="block text-sm mb-1">Search</label>
               <div className="flex gap-2">
                 <Input
@@ -173,6 +389,7 @@ export default function ProductsPage() {
               </div>
             </div>
 
+            {/* Page size */}
             <div className="md:col-span-2">
               <label className="block text-sm mb-1">Page size</label>
               <select
@@ -188,7 +405,7 @@ export default function ProductsPage() {
               </select>
             </div>
 
-            {/* === NEW: Export controls === */}
+            {/* Date range */}
             <div className="md:col-span-2">
               <label className="block text-sm mb-1">Last seen (from)</label>
               <Input
@@ -205,23 +422,6 @@ export default function ProductsPage() {
                 onChange={(e) => setLastSeenTo(e.target.value)}
               />
             </div>
-            <div className="md:col-span-12 flex items-end justify-end gap-2">
-              <Button
-                variant="secondary"
-                onClick={handleExportCsv}
-                title="Download CSV (filters above applied)"
-              >
-                Export CSV
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => refetch()}
-                disabled={isFetching}
-              >
-                {isFetching ? "Refreshing…" : "Refresh"}
-              </Button>
-            </div>
-            {/* === END: Export controls === */}
           </div>
         </CardHeader>
 
@@ -240,7 +440,6 @@ export default function ProductsPage() {
                     <TableHead>Title</TableHead>
                     <TableHead>Category</TableHead>
                     <TableHead>Type</TableHead>
-                    {/* NEW: Store column */}
                     <TableHead>Store</TableHead>
                     <TableHead
                       className="cursor-pointer select-none"
@@ -282,14 +481,11 @@ export default function ProductsPage() {
                   {pageData.items.map((p) => (
                     <TableRow key={p.id}>
                       <TableCell className="font-mono">{p.id}</TableCell>
-
                       <TableCell>
                         <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs">
                           {p.site?.name ?? "-"}
                         </span>
                       </TableCell>
-
-                      {/* Minimal URL icon with hover showing full URL */}
                       <TableCell>
                         <Button
                           asChild
@@ -308,27 +504,21 @@ export default function ProductsPage() {
                           </a>
                         </Button>
                       </TableCell>
-
-                      {/* Truncated title (hover full title) */}
                       <TableCell title={p.title ?? ""}>
                         <div className="max-w-[340px] truncate">
                           {p.title ?? "—"}
                         </div>
                       </TableCell>
-
                       <TableCell title={p.category ?? ""}>
                         <div className="max-w-[180px] truncate">
                           {p.category ?? "—"}
                         </div>
                       </TableCell>
-
                       <TableCell>
                         <span className="uppercase text-xs text-muted-foreground">
                           {p.type ?? "—"}
                         </span>
                       </TableCell>
-
-                      {/* NEW: Store cell */}
                       <TableCell title={p.amazon_store_url ?? ""}>
                         <div className="max-w-[240px] truncate">
                           {p.amazon_store_name ? (
@@ -345,11 +535,9 @@ export default function ProductsPage() {
                           )}
                         </div>
                       </TableCell>
-
                       <TableCell>{fmtPrice(p.price)}</TableCell>
                       <TableCell>{fmtDate(p.created_at)}</TableCell>
                       <TableCell>{fmtDate(p.last_seen_at)}</TableCell>
-
                       <TableCell>
                         <div className="flex gap-2">
                           <Button
@@ -397,7 +585,6 @@ export default function ProductsPage() {
         </CardContent>
       </Card>
 
-      {/* Details dialog */}
       <ProductDetailsDialog
         open={detailsOpen}
         onOpenChange={setDetailsOpen}

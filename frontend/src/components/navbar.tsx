@@ -14,7 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { LogOut, User, Users } from "lucide-react"; // ⬅️ add Users icon
+import { LogOut, User, Users } from "lucide-react";
 
 type Me = {
   id: number;
@@ -23,6 +23,13 @@ type Me = {
   is_active: boolean;
   avatar_url?: string | null;
 };
+
+const SITE_LINKS = [
+  { label: "All products", href: "/products" },
+  { label: "myvipon", href: "/products?site=myvipon" },
+  { label: "rebaid", href: "/products?site=rebaid" },
+  { label: "rebatekey", href: "/products?site=rebatekey" },
+];
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -50,11 +57,10 @@ export default function Navbar() {
 
   const isSuperUser = me?.role === "superuser";
 
-  // Top-level items: keep "Users" only for admins (NOT superusers).
+  // remove old /products top-level; we'll use a dropdown instead
   const items = [
     { href: "/", label: "Dashboard" },
-    { href: "/products", label: "Products" },
-    { href: "/scrapers", label: "scrapers" },
+    { href: "/scrapers", label: "Scrapers" },
     ...(me && me.role === "admin"
       ? [{ href: "/admin/users", label: "Users" }]
       : []),
@@ -93,6 +99,24 @@ export default function Navbar() {
               {it.label}
             </Link>
           ))}
+
+          {/* Products dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" className="px-3 py-1.5 text-sm">
+                Products
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-48">
+              <DropdownMenuLabel>Products</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {SITE_LINKS.map((link) => (
+                <DropdownMenuItem key={link.href} asChild>
+                  <Link href={link.href}>{link.label}</Link>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </nav>
 
         {/* Mobile menu button */}
@@ -107,64 +131,52 @@ export default function Navbar() {
         {/* Right side (desktop) */}
         <div className="ml-auto hidden items-center gap-3 md:flex">
           {!loading && me ? (
-            <>
-              {/* Avatar dropdown */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="rounded-full"
-                    aria-label="User menu"
-                  >
-                    <Avatar className="h-8 w-8">
-                      <AvatarImage
-                        src={me.avatar_url ?? undefined}
-                        alt={me.email}
-                      />
-                      <AvatarFallback>
-                        {(me.email?.[0] ?? "?").toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>
-                    <div className="truncate text-sm font-medium">
-                      {me.email}
-                    </div>
-                    <div className="text-xs uppercase text-muted-foreground">
-                      {me.role}
-                    </div>
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-
-                  {/* Profile */}
-                  <DropdownMenuItem onClick={() => router.push("/profile")}>
-                    <User className="mr-2 h-4 w-4" />
-                    Profile
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="rounded-full"
+                  aria-label="User menu"
+                >
+                  <Avatar className="h-8 w-8">
+                    <AvatarImage
+                      src={me.avatar_url ?? undefined}
+                      alt={me.email}
+                    />
+                    <AvatarFallback>
+                      {(me.email?.[0] ?? "?").toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel>
+                  <div className="truncate text-sm font-medium">{me.email}</div>
+                  <div className="text-xs uppercase text-muted-foreground">
+                    {me.role}
+                  </div>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => router.push("/profile")}>
+                  <User className="mr-2 h-4 w-4" />
+                  Profile
+                </DropdownMenuItem>
+                {isSuperUser && (
+                  <DropdownMenuItem onClick={() => router.push("/admin/users")}>
+                    <Users className="mr-2 h-4 w-4" />
+                    Users
                   </DropdownMenuItem>
-
-                  {/* Users moved under dropdown for superusers only */}
-                  {isSuperUser && (
-                    <DropdownMenuItem
-                      onClick={() => router.push("/admin/users")}
-                    >
-                      <Users className="mr-2 h-4 w-4" />
-                      Users
-                    </DropdownMenuItem>
-                  )}
-
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={onLogout}>
-                    <LogOut className="mr-2 h-4 w-4" />
-                    Logout
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </>
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={onLogout}>
+                  <LogOut className="mr-2 h-4 w-4" />
+                  Logout
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : (
-            <div></div>
+            <div />
           )}
         </div>
       </div>
@@ -188,6 +200,23 @@ export default function Navbar() {
                 {it.label}
               </Link>
             ))}
+            {/* Products submenu on mobile */}
+            <div className="mt-2 border-t pt-2">
+              <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
+                Products
+              </div>
+              {SITE_LINKS.map((l) => (
+                <Link
+                  key={l.href}
+                  href={l.href}
+                  onClick={() => setMobileOpen(false)}
+                  className="rounded-md px-3 py-2 text-sm hover:bg-muted/60"
+                >
+                  {l.label}
+                </Link>
+              ))}
+            </div>
+
             <div className="mt-2 border-t pt-2">
               {me ? (
                 <div className="flex items-center justify-between px-2">
@@ -203,8 +232,6 @@ export default function Navbar() {
                         Profile
                       </Link>
                     </Button>
-
-                    {/* Users shortcut on mobile for superusers */}
                     {isSuperUser && (
                       <Button variant="outline" size="sm" asChild>
                         <Link
@@ -215,7 +242,6 @@ export default function Navbar() {
                         </Link>
                       </Button>
                     )}
-
                     <Button variant="outline" size="sm" onClick={onLogout}>
                       Logout
                     </Button>

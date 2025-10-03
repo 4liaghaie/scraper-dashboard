@@ -1,18 +1,22 @@
 # --- settings (pick one) ---
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, SecretStr, EmailStr, field_validator
+from pydantic import Field, SecretStr, EmailStr, field_validator, AliasChoices
+from typing import Optional
 
 class Settings(BaseSettings):
     database_url: str = Field(..., validation_alias="DATABASE_URL")
     cors_origins: list[str] | str = Field(default="*", validation_alias="CORS_ORIGINS")  # <-- changed
     jwt_secret: SecretStr = Field(..., validation_alias="JWT_SECRET")
     jwt_algorithm: str = Field("HS256", validation_alias="JWT_ALGORITHM")
-    access_token_minutes: int = Field(60, validation_alias="ACCESS_TOKEN_MINUTES")
+    access_token_minutes: int = Field(180, validation_alias="ACCESS_TOKEN_MINUTES")
     rebaid_categories_path: str | None = Field(None, validation_alias="REBAID_CATEGORIES_PATH")
     myvipon_categories_path: str | None = Field(None, validation_alias="MYVIPON_CATEGORIES_PATH")
     superuser_email: EmailStr | None = Field(None, validation_alias="SUPERUSER_EMAIL")
     superuser_password: SecretStr | None = Field(None, validation_alias="SUPERUSER_PASSWORD")
-
+    google_service_account_json: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_SERVICE_ACCOUNT_JSON", "google_service_account_json"),
+    )
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
     @field_validator("cors_origins", mode="before")
