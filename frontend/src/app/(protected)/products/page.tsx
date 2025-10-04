@@ -1,5 +1,6 @@
 // src/app/(protected)/products/page.tsx
 "use client";
+import { Suspense } from "react";
 
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -31,6 +32,7 @@ import { ExternalLink, Info, Loader2 } from "lucide-react";
 import ProductDetailsDialog, {
   Product,
 } from "@/components/product-details-dialog";
+export const dynamic = "force-dynamic";
 
 type ProductPage = {
   items: Product[];
@@ -65,6 +67,13 @@ const fmtPrice = (v: Product["price"]) => {
 };
 
 export default function ProductsPage() {
+  return (
+    <Suspense fallback={<main className="p-6">Loading…</main>}>
+      <ProductsPageInner />
+    </Suspense>
+  );
+}
+function ProductsPageInner() {
   const router = useRouter();
   const pathname = usePathname();
   const search = useSearchParams();
