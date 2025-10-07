@@ -94,3 +94,5 @@ lcov.info
 
 # ---- Framework hosting (optional) ----
 .vercel/
+ 
+ sa.json
