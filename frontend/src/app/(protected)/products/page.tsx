@@ -175,14 +175,45 @@ function ProductsPageInner() {
 
   // CSV export
   const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "";
-  const handleExportCsv = () => {
+  // CSV export (authenticated)
+  const handleExportCsv = async () => {
     const qs = new URLSearchParams();
     if (site) qs.set("site", site);
+    if (q) qs.set("q", q); // respect search filter too
+    if (store !== "any") qs.set("store", store); // if you want to include this filter
     if (lastSeenFrom) qs.set("last_seen_from", lastSeenFrom);
     if (lastSeenTo) qs.set("last_seen_to", lastSeenTo);
-    const query = qs.toString();
-    const url = `${apiBase}/exports/products.csv${query ? `?${query}` : ""}`;
-    window.open(url, "_blank");
+
+    try {
+      // IMPORTANT: use your preconfigured axios `api` (it sets Authorization / refresh, etc.)
+      const res = await api.get(`/exports/products.csv?${qs.toString()}`, {
+        responseType: "blob",
+        withCredentials: true, // harmless if you use token headers; required if you rely on cookies
+      });
+
+      // derive filename if server sets it; otherwise make one
+      const cd = res.headers?.["content-disposition"] as string | undefined;
+      const match = cd?.match(/filename\*?=(?:UTF-8''|")?([^\";]+)/);
+      const filename =
+        (match && decodeURIComponent(match[1])) ||
+        `products_${new Date().toISOString().slice(0, 10)}.csv`;
+
+      const blob = new Blob([res.data], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      const msg =
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Export failed. Check your login and permissions.";
+      alert(`Export failed: ${msg}`);
+    }
   };
 
   // Google Sheets export
