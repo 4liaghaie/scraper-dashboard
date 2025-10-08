@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from zoneinfo import ZoneInfo
 from datetime import datetime, timezone
 
@@ -19,24 +19,27 @@ log = logging.getLogger(__name__)
 # Config
 # -------------------------------------------------------------------
 
-# Where your FastAPI is listening (internal URL the scheduler should call)
 API_BASE: str = getattr(settings, "api_base", None) or "http://127.0.0.1:8000"
-
-# Optional: use a timezone from settings; fallback to UTC
 _TZ: ZoneInfo = ZoneInfo(getattr(settings, "timezone", "UTC"))
-
-# Prevent overlapping daily pipeline runs
 _DAILY_LOCK = asyncio.Lock()
 
 # If you added cancel endpoints, set True to cancel overlaps before running
-CANCEL_OVERLAPS = False  # keep False if you didn’t add /jobs/cancel-all
+CANCEL_OVERLAPS = False
 
-# Google export config from env (add these to your .env / container)
-GSHEET_ID: Optional[str] = getattr(settings, "google_sheet_id", None) or getattr(settings, "GOOGLE_SHEET_ID", None)
-GSHEET_WORKSHEET: str = getattr(settings, "google_sheet_worksheet", None) or getattr(settings, "GOOGLE_SHEET_WORKSHEET", None) or "Daily"
-GSHEET_MODE: str = (getattr(settings, "google_sheet_mode", None) or getattr(settings, "GOOGLE_SHEET_MODE", None) or "append").lower()
+# Google export config
+GSHEET_ID: Optional[str] = (
+    getattr(settings, "google_sheet_id", None) or getattr(settings, "GOOGLE_SHEET_ID", None)
+)
+# We’ll overwrite the worksheet per-site, so this is not used directly anymore
+GSHEET_MODE: str = (
+    (getattr(settings, "google_sheet_mode", None) or getattr(settings, "GOOGLE_SHEET_MODE", None) or "replace")
+    .lower()
+)
 if GSHEET_MODE not in {"append", "replace"}:
-    GSHEET_MODE = "append"
+    GSHEET_MODE = "replace"
+
+# Your export route path. If you mounted it under /exports, change to "/exports/products.google-sheet".
+EXPORT_ROUTE = "/exports/products.google-sheet"
 
 # -------------------------------------------------------------------
 # HTTP helpers
@@ -51,9 +54,6 @@ def _client(timeout: float = 60.0) -> httpx.AsyncClient:
 
 
 async def _kick_job(kind: str, params: Dict[str, Any] | None = None) -> Optional[str]:
-    """
-    Start a job via /jobs/start and return the job_id (or None if refused/overlapping).
-    """
     async with _client(timeout=90.0) as client:
         try:
             r = await client.post("/jobs/start", json={"kind": kind, "params": params or {}})
@@ -63,9 +63,7 @@ async def _kick_job(kind: str, params: Dict[str, Any] | None = None) -> Optional
             log.info("[scheduler] started job kind=%s id=%s", kind, job_id)
             return job_id
         except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            text = e.response.text
-            log.warning("[scheduler] couldn't start %s (status=%s): %s", kind, status, text)
+            log.warning("[scheduler] couldn't start %s (status=%s): %s", kind, e.response.status_code, e.response.text)
             return None
         except Exception as e:
             log.exception("[scheduler] error starting job %s: %s", kind, e)
@@ -78,10 +76,6 @@ async def _wait_for_job(
     poll_every: float = 2.0,
     timeout: float = 3600.0,
 ) -> Dict[str, Any]:
-    """
-    Poll /jobs/status/{id} until the job is done/error/canceled (or timeout).
-    Returns the final job state dict.
-    """
     stop_status = {"done", "error", "canceled", "cancelled"}
     deadline = asyncio.get_event_loop().time() + timeout
 
@@ -109,13 +103,10 @@ async def _wait_for_job(
             await asyncio.sleep(poll_every)
 
 # -------------------------------------------------------------------
-# Auth helper (uses your superuser credentials to call protected routes)
+# Auth helper
 # -------------------------------------------------------------------
 
 async def _get_service_token() -> Optional[str]:
-    """
-    Log in with SUPERUSER_EMAIL / SUPERUSER_PASSWORD to obtain a JWT for internal calls.
-    """
     su_email = getattr(settings, "superuser_email", None)
     su_pw = getattr(settings, "superuser_password", None)
     pw = su_pw.get_secret_value() if su_pw else None
@@ -126,7 +117,6 @@ async def _get_service_token() -> Optional[str]:
     async with _client(timeout=30.0) as client:
         try:
             data = {"username": su_email, "password": pw}
-            # Your /auth/login expects x-www-form-urlencoded
             r = await client.post("/auth/login", data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
             r.raise_for_status()
             token = r.json().get("access_token")
@@ -139,59 +129,82 @@ async def _get_service_token() -> Optional[str]:
             return None
 
 # -------------------------------------------------------------------
-# Export-to-Google-Sheets
+# Site list + Export helpers
 # -------------------------------------------------------------------
 
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
-
-
-async def _export_recent_products_to_sheet(window_start: datetime, window_end: datetime) -> None:
+async def _list_sites() -> List[str]:
     """
-    Call your existing /products.google-sheet route with last_seen_from/to = run window.
-    Respects GSHEET_* settings above. Logs errors but doesn't crash the scheduler.
+    Uses your metrics endpoint to discover site names.
+    Expected payload: [{ "site": "rebaid", "count": 123 }, ...]
+    """
+    async with _client(timeout=30.0) as client:
+        r = await client.get("/metrics/products/by-site")
+        r.raise_for_status()
+        rows = r.json() or []
+        names = [str(x.get("site") or "").strip() for x in rows if x.get("site")]
+        # de-dup and keep order
+        seen, out = set(), []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
+
+
+async def _export_site_to_sheet(site_name: str, token: str) -> None:
+    """
+    Export ALL products for a single site to a worksheet named exactly as the site.
+    We ask the API to sort by last_seen_at DESC.
     """
     if not GSHEET_ID:
-        log.info("[scheduler] GOOGLE_SHEET_ID not set; skipping Google Sheets export")
-        return
-
-    token = await _get_service_token()
-    if not token:
-        log.warning("[scheduler] no service token; skipping Google Sheets export")
+        log.info("[scheduler] GOOGLE_SHEET_ID not set; skipping export for site=%s", site_name)
         return
 
     body = {
         "spreadsheet_id": GSHEET_ID,
-        "worksheet": GSHEET_WORKSHEET,
-        "mode": GSHEET_MODE,          # "append" or "replace"
-        # "start_cell": "A1",         # only needed when mode == "replace"
+        "worksheet": site_name,     # sheet name = site name
+        "mode": "replace",          # replace the whole sheet each day
+        # "start_cell": "A1",       # optional (default in your route is A1)
     }
     params = {
-        "last_seen_from": _iso(window_start),
-        "last_seen_to": _iso(window_end),
-        # You could also pass site / ids / limit, but the time window is the key.
+        "site": site_name,
+        "sort": "last_seen_desc",   # tiny route tweak below will honor this
+        # "limit": 200000,          # optional: omit to export all
     }
-
     hdrs = {"Authorization": f"Bearer {token}"}
 
-    async with _client(timeout=300.0) as client:  # longer timeout for big writes
+    async with _client(timeout=600.0) as client:  # large sheets need generous timeout
         try:
-            r = await client.post("exports/products.google-sheet", json=body, params=params, headers=hdrs)
+            r = await client.post(EXPORT_ROUTE, json=body, params=params, headers=hdrs)
             r.raise_for_status()
             res = r.json()
-            written = res.get("written_rows")
-            updated_range = res.get("updated_range")
             log.info(
-                "[scheduler] Google Sheets export OK: rows=%s range=%s worksheet=%s",
-                written, updated_range, GSHEET_WORKSHEET
+                "[scheduler] Export OK site=%s rows=%s range=%s sheet=%s",
+                site_name, res.get("written_rows"), res.get("updated_range"), res.get("worksheet")
             )
         except httpx.HTTPStatusError as e:
             log.error(
-                "[scheduler] Google Sheets export failed (%s): %s",
-                e.response.status_code, e.response.text
+                "[scheduler] Export FAILED site=%s status=%s: %s",
+                site_name, e.response.status_code, e.response.text
             )
         except Exception as e:
-            log.exception("[scheduler] Google Sheets export error: %s", e)
+            log.exception("[scheduler] Export error site=%s: %s", site_name, e)
+
+
+async def _export_all_sites_to_sheets() -> None:
+    token = await _get_service_token()
+    if not token:
+        log.warning("[scheduler] no service token; skipping per-site exports")
+        return
+
+    sites = await _list_sites()
+    if not sites:
+        log.info("[scheduler] no sites discovered; skipping export")
+        return
+
+    # Run exports sequentially to avoid Sheets quota bursts. (You can parallelize if needed.)
+    for name in sites:
+        await _export_site_to_sheet(name, token)
 
 # -------------------------------------------------------------------
 # Pipelines
@@ -202,13 +215,11 @@ async def run_daily_pipeline():
     Runs once per day:
       1) full_fresh_run (URLs + details for new URLs; no store step)
       2) amazon_stores (missing_only)
-      3) export everything seen in this window to Google Sheet
+      3) export ALL products per-site -> separate worksheet per site, sorted by last_seen_at desc
     """
     async with _DAILY_LOCK:
-        window_start = datetime.now(timezone.utc)
-        log.info("[scheduler] starting daily pipeline (window_start=%s)", window_start.isoformat())
+        log.info("[scheduler] starting daily pipeline")
 
-        # (Optional) sweep overlaps if you added cancel endpoints
         if CANCEL_OVERLAPS:
             try:
                 async with _client(timeout=30.0) as client:
@@ -219,7 +230,7 @@ async def run_daily_pipeline():
 
         # --- 1) full_fresh_run ---
         ff_params = {
-            "rebaid_max_pages": 0,          # 0 = all
+            "rebaid_max_pages": 0,
             "rebaid_timeout_ms": 30000,
             "rebatekey_headed": False,
             "myvipon_headed": True,
@@ -232,41 +243,32 @@ async def run_daily_pipeline():
         }
         ff_job = await _kick_job("full_fresh_run", ff_params)
         if ff_job:
-            await _wait_for_job(ff_job, poll_every=3.0, timeout=3 * 3600)  # up to 3h
+            await _wait_for_job(ff_job, poll_every=3.0, timeout=3 * 3600)
         else:
-            log.warning("[scheduler] full_fresh_run was not started; skipping wait")
+            log.warning("[scheduler] full_fresh_run not started; skipping wait")
 
-        # --- 2) amazon_stores (missing only) ---
-        stores_params = {
-            "missing_only": True,
-            "limit": 6000,          # adjust to your volume/rate limits
-            "timeout_ms": 12000,
-        }
-        st_job = await _kick_job("amazon_stores", stores_params)
+        # --- 2) amazon_stores ---
+        st_params = {"missing_only": True, "limit": 6000, "timeout_ms": 12000}
+        st_job = await _kick_job("amazon_stores", st_params)
         if st_job:
             await _wait_for_job(st_job, poll_every=3.0, timeout=2 * 3600)
         else:
-            log.warning("[scheduler] amazon_stores was not started; skipping wait")
+            log.warning("[scheduler] amazon_stores not started; skipping wait")
 
-        window_end = datetime.now(timezone.utc)
-        log.info("[scheduler] daily pipeline finished (window_end=%s)", window_end.isoformat())
+        # --- 3) per-site full export -> Google Sheets ---
+        await _export_all_sites_to_sheets()
 
-        # --- 3) Export everything seen in this run window ---
-        await _export_recent_products_to_sheet(window_start, window_end)
+        log.info("[scheduler] daily pipeline finished")
 
 # -------------------------------------------------------------------
-# Building / starting the scheduler
+# Scheduler wiring
 # -------------------------------------------------------------------
 
 def build_scheduler() -> AsyncIOScheduler:
-    """
-    Build and return a scheduler with a single daily job.
-    """
     sched = AsyncIOScheduler(timezone=_TZ)
-    # Example: 22:00 every day in the configured timezone
     sched.add_job(
         run_daily_pipeline,
-        CronTrigger(hour=22, minute=00, timezone=_TZ),
+        CronTrigger(hour=10, minute=29, timezone=_TZ),
         id="daily_full_fresh_plus_stores",
         replace_existing=True,
         coalesce=True,
@@ -277,9 +279,6 @@ def build_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler_in_app(app) -> AsyncIOScheduler:
-    """
-    Attach scheduler to FastAPI app lifespan.
-    """
     sched = build_scheduler()
 
     @app.on_event("startup")
