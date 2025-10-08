@@ -18,7 +18,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GOOGLE_SERVICE_ACCOUNT_JSON", "google_service_account_json"),
     )
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
-
+    google_sheet_id: str | None = Field(
+        None, validation_alias=AliasChoices("GOOGLE_SHEET_ID", "google_sheet_id")
+    )
+    google_sheet_worksheet: str = Field(
+        "Daily", validation_alias=AliasChoices("GOOGLE_SHEET_WORKSHEET", "google_sheet_worksheet")
+    )
+    google_sheet_mode: str = Field(
+        "append", validation_alias=AliasChoices("GOOGLE_SHEET_MODE", "google_sheet_mode")
+    )
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _normalize_cors(cls, v):
