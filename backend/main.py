@@ -92,9 +92,10 @@ app.include_router(product_actions_router)
 app.include_router(metrics_router)
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
 
 @app.get("/db/health")
 def db_health(db: Session = Depends(get_session)):

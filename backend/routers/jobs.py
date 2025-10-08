@@ -7,7 +7,7 @@ import asyncio
 from typing import Any, Dict, Optional, Callable, List
 from datetime import datetime  # <-- added for DB persistence timestamps
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -37,6 +37,7 @@ from services.persist_products import (
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+JOB_TASKS: dict[str, asyncio.Task] = {}
 
 # ---- Persist job_manager state to DB (place right after router = APIRouter(...)) ----
 # This wraps job_manager so every create/mark_running/tick/finish also writes to your
@@ -214,19 +215,24 @@ async def _start_job(payload: StartScrapeIn, db: Session):
         raise HTTPException(400, "unknown kind")
 
     st = await job_manager.create(kind=kind, total=total, meta={"params": payload.params})
-    asyncio.create_task(_run_job(st.id, run_coro))
+    task = asyncio.create_task(_run_job(st.id, run_coro))
+    JOB_TASKS[st.id] = task
+    task.add_done_callback(lambda t, jid=st.id: JOB_TASKS.pop(jid, None))
+
     return {"job_id": st.id, "kind": kind, "total": total}
 
 
 async def _run_job(job_id: str, run_coro: Callable[[str], Any]):
     try:
-        # Emit "started" once here
         await job_manager.mark_running(job_id)
         await run_coro(job_id)
         await job_manager.finish(job_id, "done")
+    except asyncio.CancelledError:
+        # Mark as canceled and re-raise to stop the task immediately
+        await job_manager.finish(job_id, "canceled", note="canceled by request")
+        raise
     except Exception as e:
         await job_manager.finish(job_id, "error", note=str(e))
-
 
 # ---------- job preparations (one per kind) ----------
 async def _prep_rebaid_details(p: Dict[str, Any], db: Session):
@@ -898,3 +904,51 @@ async def _prep_full_fresh_run(p: Dict[str, Any], db: Session):
                     await _chunked_upsert_details(db2, "myvipon", ok_items)
 
     return 0, run
+
+@router.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    st = job_manager.get(job_id)
+    if not st:
+        raise HTTPException(404, "job not found")
+
+    task = JOB_TASKS.get(job_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return {"job_id": job_id, "status": "canceled"}
+
+    # No live task? Mark it canceled anyway to clear the UI.
+    await job_manager.finish(job_id, "canceled", note="canceled by request (no live task)")
+    return {"job_id": job_id, "status": "canceled"}
+
+
+@router.post("/cancel-all")
+async def cancel_all_jobs(kind: str | None = Query(None, description="Optional filter by kind")):
+    canceled = []
+    # Cancel live tasks first
+    for jid, task in list(JOB_TASKS.items()):
+        if kind and (job_manager.get(jid) or {}).get("kind") != kind:
+            continue
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            canceled.append(jid)
+
+    # Also sweep any “running” without a live task (stale after crash/restart)
+    # If your job_manager exposes a way to iterate, clear those too:
+    try:
+        for st in job_manager.all():  # if available
+            if st.status == "running" and (kind is None or st.kind == kind) and st.id not in JOB_TASKS:
+                await job_manager.finish(st.id, "canceled", note="canceled (no live task)")
+                canceled.append(st.id)
+    except Exception:
+        # If job_manager has no .all(), it's fine; we still canceled the live ones.
+        pass
+
+    return {"canceled": sorted(set(canceled))}
