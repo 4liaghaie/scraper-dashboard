@@ -268,7 +268,7 @@ def build_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone=_TZ)
     sched.add_job(
         run_daily_pipeline,
-        CronTrigger(hour=10, minute=29, timezone=_TZ),
+        CronTrigger(hour=22, minute=00, timezone=_TZ),
         id="daily_full_fresh_plus_stores",
         replace_existing=True,
         coalesce=True,
