@@ -4,9 +4,12 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from datetime import datetime, time
+import random
+import re
+import time
+from datetime import datetime, time as dtime
 from io import StringIO
-from typing import Iterable, List, Optional, Literal
+from typing import Iterable, List, Optional, Literal, Iterator, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from fastapi.responses import StreamingResponse
@@ -18,6 +21,12 @@ from db import get_session
 import models
 from security import get_current_user
 from settings import settings
+
+# Google API errors type (used by retry helpers)
+try:
+    from googleapiclient.errors import HttpError  # type: ignore
+except Exception:  # library may not be installed on app boot; we only use it in Sheets code-paths
+    HttpError = Exception  # fallback typing
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 logger = logging.getLogger(__name__)
@@ -31,7 +40,6 @@ CSV_FIELDS = [
     "first_seen_at", "last_seen_at", "created_at", "updated_at",
 ]
 
-
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
@@ -41,7 +49,7 @@ def _parse_date_bound(s: Optional[str], *, end: bool = False) -> Optional[dateti
     try:
         if len(s) == 10:  # YYYY-MM-DD
             d = datetime.strptime(s, "%Y-%m-%d").date()
-            return datetime.combine(d, time.max if end else time.min)
+            return datetime.combine(d, dtime.max if end else dtime.min)
         return datetime.fromisoformat(s)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD or ISO-8601.")
@@ -114,7 +122,6 @@ def _stream_csv(rows: Iterable[models.Product]) -> Iterable[str]:
         writer.writerow(_row_from_product(p))
         yield buf.getvalue()
         buf.seek(0); buf.truncate(0)
-
 
 # -------------------------------------------------------------------
 # CSV endpoints
@@ -200,7 +207,6 @@ def export_single_product_csv(product_id: int, db: Session = Depends(get_session
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
-
 # -------------------------------------------------------------------
 # Google Sheets export
 # -------------------------------------------------------------------
@@ -257,12 +263,55 @@ def _col_letter(n: int) -> str:
     return s
 
 
+def _parse_a1_cell(cell: str) -> Tuple[int, str]:
+    """
+    Parse an A1 cell like 'B3' -> (row=3, col_letter='B').
+    Defaults to (1, 'A') if parsing fails.
+    """
+    try:
+        m = re.match(r"^\s*([A-Za-z]+)(\d+)\s*$", cell or "")
+        if not m:
+            return 1, "A"
+        col_letters = m.group(1).upper()
+        row_num = int(m.group(2))
+        if row_num < 1:
+            row_num = 1
+        return row_num, col_letters
+    except Exception:
+        return 1, "A"
+
+# ------------------ RETRYABLE SHEETS OPS (avoid 500s) -------------------------
+def _retryable(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    msg = (str(exc) or "").lower()
+    return (
+        status == 429 or (isinstance(status, int) and status >= 500)
+        or "internal error" in msg or "backend" in msg
+    )
+
+
+def _exec_with_retry(fn, tries: int = 6, base: float = 0.4):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if i == tries - 1 or not _retryable(e):
+                raise
+            time.sleep(base * (2 ** i) + random.random() * 0.2)
+    if last:
+        raise last
+
+
 def _ensure_worksheet(service, spreadsheet_id: str, title: Optional[str]) -> str:
     """
     Return an existing or created sheet title.
     If title is None, return the first sheet title.
     """
-    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    meta = _exec_with_retry(lambda: service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id, fields="sheets.properties"
+    ).execute())
     sheets = meta.get("sheets", [])
     if not sheets:
         raise HTTPException(status_code=400, detail="Spreadsheet has no sheets")
@@ -271,21 +320,147 @@ def _ensure_worksheet(service, spreadsheet_id: str, title: Optional[str]) -> str
             if s["properties"]["title"] == title:
                 return title
         # create if missing
-        service.spreadsheets().batchUpdate(
+        _exec_with_retry(lambda: service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
             body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
-        ).execute()
+        ).execute())
         return title
     return sheets[0]["properties"]["title"]
 
 
+def _clear_tab(service, spreadsheet_id: str, title: str, last_col_letter: str) -> None:
+    _exec_with_retry(lambda: service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"{title}!A:{last_col_letter}",
+        body={}
+    ).execute())
+
+
+def _write_chunk(service, spreadsheet_id: str, title: str, start_cell_a1: str, rows2d: List[List[str]]):
+    body = {
+        "valueInputOption": "RAW",
+        "data": [{
+            "range": f"{title}!{start_cell_a1}",
+            "majorDimension": "ROWS",
+            "values": rows2d,
+        }],
+    }
+    _exec_with_retry(lambda: service.spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id, body=body
+    ).execute())
+
+
+def _get_last_non_empty_row(service, spreadsheet_id: str, title: str) -> int:
+    """
+    Returns the last non-empty row index by scanning column A.
+    If there is no data at all, returns 0.
+    """
+    resp = _exec_with_retry(lambda: service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{title}!A:A"
+    ).execute())
+    values = resp.get("values", [])
+    return len(values)  # number of non-empty rows in col A
+
+
+def _header_exists(service, spreadsheet_id: str, title: str) -> bool:
+    col = _col_letter(len(CSV_FIELDS))
+    resp = _exec_with_retry(lambda: service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{title}!A1:{col}1"
+    ).execute())
+    vals = resp.get("values", [])
+    if not vals:
+        return False
+    row = vals[0]
+    # If the header row has the same number of columns and identical values, consider present.
+    return len(row) >= len(CSV_FIELDS) and all((row[i] == CSV_FIELDS[i] for i in range(len(CSV_FIELDS))))
+
+# ------------------ STREAMED WRITERS -------------------------
+def _iter_rows_from_query(q, batch_size: int = 5000) -> Iterator[models.Product]:
+    # SQLAlchemy stream: avoid loading all rows into RAM
+    for p in q.yield_per(batch_size):
+        yield p
+
+
+def _write_replace_streamed(
+    service, spreadsheet_id: str, title: str, start_cell: str, row_iter: Iterator[models.Product],
+    *, chunk_rows: int = 1000
+) -> int:
+    """
+    Clears the sheet, writes header at start_cell, then streams rows in chunks below it.
+    Returns total written rows (including header).
+    """
+    start_row, start_col_letters = _parse_a1_cell(start_cell)
+    last_col_letter = _col_letter(len(CSV_FIELDS))
+
+    # clear entire data region (A:ZZ) to keep behavior consistent with original "replace"
+    _clear_tab(service, spreadsheet_id, title, last_col_letter)
+
+    # write header at start_cell (e.g., A1 or custom)
+    _write_chunk(service, spreadsheet_id, title, f"{start_col_letters}{start_row}", [CSV_FIELDS])
+    written = 1
+    next_row = start_row + 1
+
+    buf: List[List[str]] = []
+    for p in row_iter:
+        buf.append(_row_from_product(p))
+        if len(buf) >= chunk_rows:
+            _write_chunk(service, spreadsheet_id, title, f"{start_col_letters}{next_row}", buf)
+            written += len(buf)
+            next_row += len(buf)
+            buf = []
+    if buf:
+        _write_chunk(service, spreadsheet_id, title, f"{start_col_letters}{next_row}", buf)
+        written += len(buf)
+
+    return written
+
+
+def _write_append_streamed(
+    service, spreadsheet_id: str, title: str, row_iter: Iterator[models.Product],
+    *, chunk_rows: int = 1000
+) -> int:
+    """
+    Appends to the end of the sheet (based on column A).
+    If the sheet is empty, writes the header first.
+    Returns total written rows (includes header if written).
+    """
+    written = 0
+    last_row = _get_last_non_empty_row(service, spreadsheet_id, title)
+
+    # If empty sheet: write header at A1, start at A2
+    if last_row == 0:
+        _write_chunk(service, spreadsheet_id, title, "A1", [CSV_FIELDS])
+        written += 1
+        next_row = 2
+    else:
+        # If sheet has data but header is missing (custom sheet), we don't inject header;
+        # we just continue appending after last_row.
+        next_row = last_row + 1
+
+    buf: List[List[str]] = []
+    for p in row_iter:
+        buf.append(_row_from_product(p))
+        if len(buf) >= chunk_rows:
+            _write_chunk(service, spreadsheet_id, title, f"A{next_row}", buf)
+            written += len(buf)
+            next_row += len(buf)
+            buf = []
+    if buf:
+        _write_chunk(service, spreadsheet_id, title, f"A{next_row}", buf)
+        written += len(buf)
+
+    return written
+
+# ------------------ API MODEL -------------------------
 class SheetExportBody(BaseModel):
     spreadsheet_id: str
     worksheet: Optional[str] = None
     mode: Literal["replace", "append"] = "replace"
-    start_cell: str = "A1"
+    start_cell: str = "A1"   # honored for replace; append always appends after last row
 
-
+# ------------------ EXPORT ENDPOINT -------------------------
 @router.post("/products.google-sheet", dependencies=[Depends(get_current_user)])
 def export_products_to_google_sheet(
     body: SheetExportBody = Body(...),
@@ -298,7 +473,6 @@ def export_products_to_google_sheet(
     last_seen_from: Optional[str] = Query(None, description="YYYY-MM-DD or ISO-8601"),
     last_seen_to: Optional[str] = Query(None, description="YYYY-MM-DD or ISO-8601"),
     limit: Optional[int] = Query(None, ge=1, le=200000),
-    # NEW: sorting control for Sheets export
     sort: Optional[str] = Query("last_seen_desc", description="last_seen_desc|last_seen_asc"),
 ):
     # ----- build selection -----
@@ -329,8 +503,8 @@ def export_products_to_google_sheet(
     else:
         q = q.order_by(models.Product.id.asc())
 
-    rows = list(q.all())
-    values: List[List[str]] = [CSV_FIELDS] + [_row_from_product(p) for p in rows]
+    # Stream the DB rows
+    rows_iter = _iter_rows_from_query(q, batch_size=5000)
 
     # ----- auth / service -----
     try:
@@ -367,36 +541,25 @@ def export_products_to_google_sheet(
             )
         raise HTTPException(status_code=500, detail=f"Failed to access spreadsheet: {e}")
 
-    # ----- write values -----
-    last_col_letter = _col_letter(len(CSV_FIELDS))
-    updated_range: Optional[str] = None
-
+    # ----- write values (streamed & chunked) -----
     try:
         if body.mode == "append":
-            resp = service.spreadsheets().values().append(
-                spreadsheetId=body.spreadsheet_id,
-                range=f"{sheet_title}!A1",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": values},
-            ).execute()
-            updated_range = (resp or {}).get("updates", {}).get("updatedRange")
+            written_rows = _write_append_streamed(
+                service=service,
+                spreadsheet_id=body.spreadsheet_id,
+                title=sheet_title,
+                row_iter=rows_iter,
+                chunk_rows=1000,  # tune if needed
+            )
         else:
-            # replace: clear existing range then write from start_cell
-            clear_range = f"{sheet_title}!A:{last_col_letter}"
-            service.spreadsheets().values().clear(
-                spreadsheetId=body.spreadsheet_id,
-                range=clear_range,
-                body={}
-            ).execute()
-            write_range = f"{sheet_title}!{body.start_cell}"
-            resp = service.spreadsheets().values().update(
-                spreadsheetId=body.spreadsheet_id,
-                range=write_range,
-                valueInputOption="RAW",
-                body={"values": values},
-            ).execute()
-            updated_range = (resp or {}).get("updatedRange")
+            written_rows = _write_replace_streamed(
+                service=service,
+                spreadsheet_id=body.spreadsheet_id,
+                title=sheet_title,
+                start_cell=body.start_cell or "A1",
+                row_iter=rows_iter,
+                chunk_rows=1000,  # tune if needed
+            )
     except Exception as e:
         logger.exception("Failed to write to Google Sheet")
         status = getattr(getattr(e, "resp", None), "status", None)
@@ -414,7 +577,6 @@ def export_products_to_google_sheet(
         "spreadsheet_id": body.spreadsheet_id,
         "worksheet": sheet_title,
         "mode": body.mode,
-        "written_rows": len(values),  # includes header row
-        "updated_range": updated_range,
+        "written_rows": written_rows,  # includes header row if written
         "service_account": sa_email,
     }
