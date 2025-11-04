@@ -234,11 +234,11 @@ async def run_daily_pipeline():
             "rebaid_timeout_ms": 30000,
             "rebatekey_headed": False,
             "myvipon_headed": True,
-            "rebaid_detail_timeout_ms": 12000,
+            "rebaid_detail_timeout_ms": 30000,
             "rebatekey_concurrency": 12,
             "rebatekey_retries": 2,
-            "rebatekey_timeout": 20.0,
-            "myvipon_workers": 8,
+            "rebatekey_timeout": 30.0,
+            "myvipon_workers": 4,
             "myvipon_timeout": 30,
         }
         ff_job = await _kick_job("full_fresh_run", ff_params)

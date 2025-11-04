@@ -295,7 +295,7 @@ async def _prep_myvipon_details(p: Dict[str, Any], db: Session):
     """
     only_missing: bool = bool(p.get("only_missing", False))
     limit: int = int(p.get("limit", 200))
-    workers: int = int(p.get("workers", 6))
+    workers: int = int(p.get("workers", 4))
     timeout: int = int(p.get("timeout", 30))
     proxy: Optional[str] = p.get("proxy")
     retries: int = int(p.get("retries", 2))
